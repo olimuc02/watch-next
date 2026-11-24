@@ -11,6 +11,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Watch Next">
 <link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap" rel="stylesheet">
@@ -31,7 +33,7 @@ body{background:var(--bg);color:var(--ink);font:16px/1.45 Roboto,-apple-system,B
 .display{font-family:Roboto,-apple-system,system-ui,sans-serif;font-weight:700;letter-spacing:-.005em}
 header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:6px 2px 22px}
 header h1{margin:0;font-size:30px;line-height:1;font-weight:900;letter-spacing:-.02em}
-header h1 b{background:var(--gold);color:#000;padding:2px 7px 3px;border-radius:5px;margin-right:6px;font-weight:900}
+header h1 b{background:var(--gold);color:#000;padding:3px 10px 4px;border-radius:6px;font-weight:900;display:inline-block}
 header .counts{color:var(--muted);font-size:13px;text-align:right;line-height:1.35}
 header .counts b{color:var(--ink);font-weight:600}
 .section-title{font-size:21px;font-weight:700;color:var(--ink);margin:30px 2px 14px;display:flex;justify-content:space-between;align-items:center}
@@ -218,7 +220,7 @@ details li{margin-bottom:4px}
 <body>
 <div class="wrap">
   <header>
-    <h1 class="display"><b>Watch</b>Next</h1>
+    <h1 class="display"><b>Watch Next</b></h1>
     <div class="counts" id="counts"></div>
   </header>
   <main id="main"></main>
