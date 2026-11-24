@@ -269,7 +269,7 @@ const hue = t => { let h = 7; for (const c of norm(t) || t) h = (h * 31 + c.char
 function poster(m, size){
   const label = size === 'xs' ? esc((m.title.replace(/^(the|a|an)\s+/i,'')[0] || '?').toUpperCase()) : esc(m.title);
   const img = m.poster ? `<img src="${esc(m.poster)}" alt="" loading="lazy" decoding="async" onerror="this.remove()">` : '';
-  if (!m.poster && m.posterTried === undefined) queuePoster(m.id);
+  if (m.lookupV !== LOOKUP_V) queuePoster(m.id);
   return `<div class="poster ${size}${m.poster ? ' has-img' : ''}" data-pid="${m.id}" data-size="${size}" style="--h:${hue(m.title)}">${m.year && size !== 'xs' && size !== 'sm' ? `<i class="yr">${m.year}</i>` : ''}<span>${label}</span>${img}</div>`;
 }
 
@@ -288,39 +288,92 @@ function pumpPosters(){
 }
 function aboutHTML(m){
   if (!m.about){
-    if (!m.aboutTried) { queuePoster(m.id); return `<p class="about loading" data-about="${m.id}">Finding a description…</p>`; }
+    if (m.lookupV !== LOOKUP_V) { queuePoster(m.id); return `<p class="about loading" data-about="${m.id}">Finding a description…</p>`; }
     return `<p class="about" data-about="${m.id}" style="display:none"></p>`;
   }
   return `<p class="about" data-about="${m.id}" onclick="this.classList.toggle('open')">${esc(m.about)}</p>`;
 }
-const stripFilm =t => t.replace(/\s*\((?:(?:19|20)\d{2} )?(?:[a-z ]+ )?film\)$/i, '');
-async function wikiSearch(q){
-  const u = 'https://en.wikipedia.org/w/api.php?action=query&format=json&origin=*&generator=search&gsrlimit=6&prop=pageimages|description|extracts&exintro=1&explaintext=1&exsentences=4&exlimit=6&piprop=thumbnail&pithumbsize=400&pilicense=any&gsrsearch=' + encodeURIComponent(q);
+const stripFilm = t => t.replace(/\s*\((?:(?:19|20)\d{2} )?(?:[a-z ]+ )?film\)$/i, '');
+async function wikiSearch(q, prefix){
+  const gen = prefix ? 'generator=prefixsearch&gpslimit=10&gpssearch=' : 'generator=search&gsrlimit=10&gsrsearch=';
+  const u = 'https://en.wikipedia.org/w/api.php?action=query&format=json&origin=*&prop=pageimages|description|extracts|pageprops|info&ppprop=wikibase_item&exintro=1&explaintext=1&exsentences=4&exlimit=10&piprop=thumbnail&pithumbsize=400&pilicense=any&' + gen + encodeURIComponent(q);
   const r = await fetch(u); if (!r.ok) throw new Error('net');
   const j = await r.json();
   return Object.values((j.query && j.query.pages) || {}).sort((a,b) => a.index - b.index);
 }
+// How alike two titles are, 0 to 1 (catches small typos)
+function similar(a, b){
+  if (a === b) return 1;
+  if (!a || !b) return 0;
+  const d = Array.from({length:b.length + 1}, (_, i) => i);
+  for (let i = 1; i <= a.length; i++){
+    let prev = d[0]; d[0] = i;
+    for (let j = 1; j <= b.length; j++){ const t = d[j]; d[j] = Math.min(d[j] + 1, d[j-1] + 1, prev + (a[i-1] === b[j-1] ? 0 : 1)); prev = t; }
+  }
+  return 1 - d[b.length] / Math.max(a.length, b.length);
+}
+async function wikidataFacts(q){
+  const r = await fetch(`https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${q}&props=claims&format=json&origin=*`);
+  if (!r.ok) return {};
+  const c = (((await r.json()).entities || {})[q] || {}).claims || {};
+  const val = p => c[p] && c[p][0] && c[p][0].mainsnak.datavalue && c[p][0].mainsnak.datavalue.value;
+  const dates = (c.P577 || []).map(x => x.mainsnak.datavalue && x.mainsnak.datavalue.value.time).filter(Boolean).sort();
+  const dur = val('P2047');
+  return { imdb: val('P345'), year: dates[0] ? +dates[0].slice(1,5) : null, runtime: dur ? Math.round(Math.abs(parseFloat(dur.amount))) : null };
+}
+const LOOKUP_V = 2;
 async function findPoster(m){
-  if (!m || (m.poster && m.aboutTried)) return;
+  if (!m || m.lookupV === LOOKUP_V) return;
   try {
     const want = norm(m.title);
-    const tries = m.year ? [`${m.title} ${m.year} film`, `${m.title} film`] : [`${m.title} film`];
-    let best = null;
-    for (const q of tries){
-      const pages = await wikiSearch(q);
-      const films = pages.filter(p => p.thumbnail && /film|movie|documentary|animated/i.test(p.description || '') && norm(stripFilm(p.title)) === want);
-      best = (m.year && films.find(p => (p.description || '').includes(String(m.year)) || p.title.includes(String(m.year)))) || films[0];
-      if (best) break;
+    const knownTT = ((m.url || '').match(/tt\d+/) || [])[0];   // came from an IMDb file: must match exactly
+    const isFilm = p => /film|movie|documentary|animated/i.test(p.description || '') && !/series|franchise|trilogy|soundtrack|character|novel|disambiguation/i.test((p.description || '') + ' ' + p.title);
+    const yearOk = p => !!m.year && ((p.description || '').includes(String(m.year)) || p.title.includes(String(m.year)));
+    const exact = p => norm(stripFilm(p.title)) === want;
+    const near = p => similar(norm(stripFilm(p.title)), want) >= .8;
+    // When titles tie, the better-known movie (longer Wikipedia article) wins
+    const byFame = arr => [...arr].sort((a,b) => (b.length||0) - (a.length||0));
+    const pool = new Map();
+    const run = async (q, prefix) => { for (const p of await wikiSearch(q, prefix)) if (isFilm(p)) pool.set(p.pageid, p); };
+    const pick = () => {
+      const all = [...pool.values()];
+      return [...new Set([...byFame(all.filter(p => exact(p) && yearOk(p))), ...byFame(all.filter(exact)), ...byFame(all.filter(near))])];
+    };
+    if (m.year) await run(`${m.title} ${m.year} film`);
+    await run(`${m.title} film`);
+    if (!pick().some(exact)){                                        // probably a typo or half-typed: search wider
+      await run(want.length > 3 ? m.title.split(/\s+/).map(w => w + '~').join(' ') + ' film' : m.title);
+      await run(m.title, true);
+    }
+    let best = null, facts = {};
+    for (const p of pick().slice(0, knownTT ? 5 : 1)){
+      const f = p.pageprops && p.pageprops.wikibase_item ? await wikidataFacts(p.pageprops.wikibase_item).catch(() => ({})) : {};
+      if (!knownTT || f.imdb === knownTT){ best = p; facts = f; break; }
     }
     const cur = byId(m.id); if (!cur) return;
     if (best){
-      if (!cur.poster) cur.poster = best.thumbnail.source;
-      if (!cur.year){ const y = (best.description || '').match(/\b(19\d{2}|20\d{2})\b/); if (y) cur.year = +y[1]; }
+      if (!cur.typedTitle) cur.typedTitle = cur.title;
+      cur.title = stripFilm(best.title);                         // official title, not what was typed
+      if (facts.imdb) cur.url = `https://www.imdb.com/title/${facts.imdb}/`;
+      if (facts.year) cur.year = facts.year;
+      else if (!cur.year){ const y = (best.description || '').match(/\b(19\d{2}|20\d{2})\b/); if (y) cur.year = +y[1]; }
+      if (!cur.runtime && facts.runtime) cur.runtime = facts.runtime;
+      if (best.thumbnail) cur.poster = best.thumbnail.source;
       cur.about = (best.extract || '').replace(/\s*\([^()]*(?:pronounced|Korean|Japanese|French|Chinese|Spanish|Italian|German|lit\.)[^()]*\)/g, '').replace(/\s{2,}/g, ' ').trim();
       cur.wikiTitle = best.title;
+      cur.matched = true;
+      // Two typed versions of the same movie → keep one
+      const twin = S.movies.find(x => x !== cur && x.url && x.url === cur.url);
+      if (twin){
+        twin.sources = [...new Set([...twin.sources, ...cur.sources])];
+        S.movies.splice(S.movies.indexOf(cur), 1);
+        save(); render(); return;
+      }
     }
-    cur.posterTried = cur.aboutTried = Date.now();
+    cur.lookupV = LOOKUP_V;
     save();
+    const typing = document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
+    if (best && !drag && !typing && S.tab !== 'add'){ clearTimeout(findPoster.t); findPoster.t = setTimeout(render, 150); return; }
     document.querySelectorAll(`[data-pid="${m.id}"]`).forEach(el => { el.outerHTML = poster(cur, el.dataset.size); });
     document.querySelectorAll(`[data-about="${m.id}"]`).forEach(el => { el.outerHTML = aboutHTML(cur); });
     if (sheetId === m.id) renderSheet();
@@ -496,7 +549,7 @@ function renderTonight(){
         <div class="btns fill"><button class="btn" data-act="another">Pick Another Anyway</button></div></div></div>`;
   } else if (m){
     hero = `<div class="hero fade" style="--h:${hue(m.title)}"><div class="glow"${m.poster ? ` style="background:url('${esc(m.poster)}')"` : ''}></div>
-      <div class="inner">${poster(m,'lg')}<div style="min-width:0">
+      <div class="inner"><a href="${esc(imdbLink(m))}" target="_blank" rel="noopener" style="flex:none">${poster(m,'lg')}</a><div style="min-width:0">
         <div class="label">Tonight's Pick · #${rank} On Your List</div>
         <h2 class="title display">${esc(m.title)}</h2>
         ${metaHTML(m)}
@@ -568,10 +621,11 @@ function renderSheet(){
   const m = byId(sheetId); if (!m){ closeSheet(); return; }
   const q = queue(), i = q.indexOf(m);
   $('#sheet').innerHTML = `<div class="grab"></div>
-    <div class="top">${poster(m,'md')}<div style="min-width:0">
+    <div class="top"><a href="${esc(imdbLink(m))}" target="_blank" rel="noopener" style="flex:none">${poster(m,'md')}</a><div style="min-width:0">
       <div class="muted small" style="margin-bottom:6px">${m.watched ? 'Watched' : '#' + (i+1) + ' On Your List'}</div>
       <h3 class="display">${esc(m.title)}</h3>${metaHTML(m)}
-      <div class="muted small" style="margin-top:8px">From ${esc(m.sources.join(' + '))}</div></div></div>
+      <div class="muted small" style="margin-top:8px">From ${esc(m.sources.join(' + '))}</div>
+      <div class="small" style="margin-top:6px">${m.matched && /tt\d+/.test(m.url || '') ? '<span style="color:var(--gold)">✓</span> <span class="muted">Linked to IMDb</span>' : m.lookupV === LOOKUP_V ? '<span class="muted">Not matched yet. Tap Fix Title and try the full name.</span>' : '<span class="muted">Looking it up…</span>'}</div></div></div>
     ${aboutHTML(m)}
     ${m.watched ? '' : `
     <div class="seg">${[1,2,3].map(t => `<button class="${m.tier === t ? 'on' : ''}" data-act="tier" data-t="${t}" data-id="${m.id}"><i class="dot t${t}"></i>${TIERS[t]}</button>`).join('')}</div>
@@ -589,7 +643,7 @@ function renderSheet(){
     </div>
     <div class="btns fill">
       <button class="btn ghost" data-act="rename" data-id="${m.id}">Fix Title</button>
-      ${m.poster ? '' : `<button class="btn ghost" data-act="reposter" data-id="${m.id}">Find Poster</button>`}
+      ${m.matched ? '' : `<button class="btn ghost" data-act="reposter" data-id="${m.id}">Look Up Again</button>`}
       <button class="btn ghost" data-act="remove" data-id="${m.id}" style="color:var(--red)">Remove</button>
     </div>`;
 }
@@ -780,8 +834,8 @@ function act(a, el){
     case 'top': { moveToQueueIndex(id, 0); const q = queue(); if (q[1] && q[1].tier) byId(id).tier = q[1].tier; save(); toast('Moved to #1'); break; }
     case 'bottom': moveToQueueIndex(id, 1e9); save(); toast('Moved to the bottom'); break;
     case 'tier': setTier(id, +el.dataset.t); save(); toast('Moved to ' + TIERS[el.dataset.t]); break;
-    case 'rename': { const m = byId(id); const t = prompt('Fix the title', m.title); if (t && t.trim()){ m.title = t.trim(); m.poster = ''; delete m.posterTried; save(); } break; }
-    case 'reposter': { const m = byId(id); m.poster = ''; delete m.posterTried; save(); toast('Looking for a poster'); break; }
+    case 'rename': { const m = byId(id); const t = prompt('Fix the title', m.title); if (t && t.trim()){ m.title = t.trim(); m.year = null; m.url = ''; m.poster = ''; m.about = ''; m.matched = false; delete m.lookupV; save(); toast('Looking it up on IMDb'); } break; }
+    case 'reposter': { const m = byId(id); delete m.lookupV; save(); toast('Looking it up again'); break; }
     case 'remove': { const m = byId(id); if (confirm(`Remove "${m.title}" from your list?`)){ S.movies.splice(S.movies.indexOf(m), 1); closeSheet(); save(); } break; }
     case 'startsort': sortQueue = queue().filter(m => el.dataset.all === '1' || !m.tier).map(m => m.id); sortDone = 0; rankMode = 'sort'; break;
     case 'sorttier': setTier(sortQueue.shift(), +el.dataset.t); sortDone++; save(); break;
