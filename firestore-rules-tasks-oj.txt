@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /french_progress/{code} {
+      // Only allow access to docs whose ID matches your code format: ABCD-1234
+      allow read, write: if code.matches('^[A-Z2-9]{4}-[A-Z2-9]{4}$');
+
+      // Optional but recommended: only allow writes with your expected fields
+      allow write: if request.resource.data.keys().hasOnly(['blob', 'updatedAt'])
+                   && request.resource.data.blob is string
+                   && request.resource.data.updatedAt is string;
+    }
+
+    // Habits app
+    match /habit_config/{id} { allow read, write: if true; }
+    match /habit_days/{id}   { allow read, write: if true; }
+
+    // Tasks app (Oliver & Josh)
+    match /tasks/{id}           { allow read, write: if true; }
+    match /custom_tags/{id}     { allow read, write: if true; }
+    match /social_accounts/{id} { allow read, write: if true; }
+    match /fcm_tokens/{id}      { allow read, write: if true; }
+    match /test_pings/{id}      { allow read, write: if true; }
+
+    // Run Club (Oliver & Alexis)
+    match /run_config/{id} { allow read, write: if true; }
+    match /run_logs/{id}   { allow read, write: if true; }
+    match /run_photos/{id} { allow read, write: if true; }
+
+    // Watch Next (movie queue) — one doc per 6-character sync code
+    match /watchnext_sync/{code} {
+      allow read: if code.matches('^[A-Z2-9]{6}$');
+      allow write: if code.matches('^[A-Z2-9]{6}$')
+                   && request.resource.data.keys().hasOnly(['data', 'updatedAt', 'device'])
+                   && request.resource.data.data is string
+                   && request.resource.data.data.size() < 1000000;
+    }
+
+    // Deny everything else by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
