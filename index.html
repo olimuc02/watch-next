@@ -250,7 +250,12 @@ function load(){
   return blank();
 }
 let S = load();
-function save(){ try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} }
+let applyingRemote = false;
+function save(){
+  if (!applyingRemote){ S.updatedAt = Date.now(); S.dirty = true; }
+  try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){}
+  if (!applyingRemote) pushSoon();
+}
 
 /* ---------- Helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -391,6 +396,107 @@ function metaBits(m, withStar = true){
 const metaHTML = m => `<div class="meta">${metaBits(m).map(x => `<span>${x}</span>`).join('')}</div>`;
 const plain = m => [m.year, fmtRun(m.runtime), (m.genres||[]).slice(0,2).join(', ')].filter(Boolean).join(' · ');
 const niceDate = () => new Date().toLocaleDateString(undefined,{weekday:'long', month:'long', day:'numeric'});
+
+/* ---------- Sync between devices with a code ---------- */
+const SYNC_KEY = 'watchnext.sync', SYNC_COL = 'watchnext_sync';
+const FB = { apiKey:'AIzaSyDu-bAYH7t7rf-y3Fs0K1GjyvjFrSTDSSc', authDomain:'tasks-oj.firebaseapp.com', projectId:'tasks-oj' };
+const DEVICE = (() => { try { let d = localStorage.getItem('watchnext.device'); if (!d){ d = uid(); localStorage.setItem('watchnext.device', d); } return d; } catch(e){ return uid(); } })();
+let syncCode = null; try { syncCode = localStorage.getItem(SYNC_KEY); } catch(e){}
+let FS = null, db = null, unsub = null, pushT = null, pushing = false, syncState = syncCode ? 'connecting' : 'off', lastSynced = 0;
+async function fb(){
+  if (db) return;
+  const [app, store] = await Promise.all([
+    import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js'),
+    import('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js')]);
+  FS = store; db = store.getFirestore(app.initializeApp(FB, 'watchnext'));
+}
+function newCode(){
+  const A = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789', r = crypto.getRandomValues(new Uint32Array(6));
+  return [...r].map(n => A[n % A.length]).join('');
+}
+function payload(){
+  const d = {movies:S.movies, imports:S.imports || [], settings:S.settings, today:S.today};
+  let json = JSON.stringify(d);
+  if (json.length > 900000) json = JSON.stringify({...d, movies:S.movies.map(({about, ...m}) => m)});   // stay under the 1 MB limit
+  return json;
+}
+function pushSoon(){
+  if (!syncCode || !db) return;
+  clearTimeout(pushT); setSyncState('saving');
+  pushT = setTimeout(pushNow, 700);
+}
+async function pushNow(){
+  clearTimeout(pushT); pushT = null; pushing = true;
+  try {
+    await FS.setDoc(FS.doc(db, SYNC_COL, syncCode), {data:payload(), updatedAt:Date.now(), device:DEVICE});
+    S.dirty = false; try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){}
+    lastSynced = Date.now(); setSyncState('ok');
+  } catch(e){ setSyncState('error'); }
+  pushing = false;
+}
+function applyRemote(d){
+  const r = JSON.parse(d.data);
+  applyingRemote = true;
+  S.movies = r.movies || []; S.imports = r.imports || []; S.settings = Object.assign(S.settings, r.settings || {}); S.today = r.today || null;
+  S.updatedAt = d.updatedAt; S.dirty = false;
+  save(); applyingRemote = false;
+  lastSynced = Date.now(); setSyncState('ok'); safeRender();
+}
+function safeRender(){
+  const typing = document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
+  if (drag || typing){ setTimeout(safeRender, 800); return; }
+  render();
+}
+async function startListening(){
+  try {
+    await fb();
+    if (unsub) unsub();
+    let first = true;
+    unsub = FS.onSnapshot(FS.doc(db, SYNC_COL, syncCode), snap => {
+      if (snap.metadata.hasPendingWrites) return;
+      const d = snap.exists() ? snap.data() : null;
+      if (first){ first = false; if (S.dirty || !d){ pushNow(); return; } }
+      if (d && d.device !== DEVICE && !pushT && !pushing) applyRemote(d);
+      else setSyncState('ok');
+    }, () => setSyncState('error'));
+  } catch(e){ setSyncState('error'); }
+}
+async function createSync(){
+  setSyncState('connecting');
+  await fb();
+  syncCode = newCode(); try { localStorage.setItem(SYNC_KEY, syncCode); } catch(e){}
+  await pushNow();
+  if (syncState === 'error'){ stopSync(); throw new Error('denied'); }
+  startListening();
+}
+async function joinSync(code){
+  await fb();
+  const snap = await FS.getDoc(FS.doc(db, SYNC_COL, code));
+  if (!snap.exists()) throw new Error('notfound');
+  const r = JSON.parse(snap.data().data);
+  // Keep everything from both devices: the synced list first, then anything only this device had
+  const merged = [...(r.movies || [])];
+  for (const m of S.movies){
+    if (!merged.some(x => (x.url && x.url === m.url) || (norm(x.title) === norm(m.title) && (!x.year || !m.year || +x.year === +m.year)))) merged.push(m);
+  }
+  S.movies = merged;
+  S.imports = [...(r.imports || []), ...(S.imports || [])].slice(0, 8);
+  S.settings = Object.assign(S.settings, r.settings || {});
+  if (r.today) S.today = r.today;
+  syncCode = code; try { localStorage.setItem(SYNC_KEY, code); } catch(e){}
+  save(); await pushNow(); startListening();
+}
+function stopSync(){
+  if (unsub) unsub(); unsub = null; clearTimeout(pushT); pushT = null;
+  syncCode = null; try { localStorage.removeItem(SYNC_KEY); } catch(e){}
+  setSyncState('off');
+}
+function syncLabel(){
+  return {off:'', connecting:'Connecting…', saving:'Saving…', error:'<span style="color:var(--red)">Can\'t reach sync right now. Changes are saved here and will sync later.</span>',
+    ok:'<span style="color:var(--gold)">●</span> Up to date'}[syncState] || '';
+}
+function setSyncState(s){ syncState = s; const el = document.getElementById('syncStatus'); if (el) el.innerHTML = syncLabel(); }
+window.addEventListener('online', () => { if (syncCode) startListening(); });
 
 /* ---------- Reordering ---------- */
 function moveToQueueIndex(id, idx){
@@ -790,9 +896,23 @@ function renderAdd(){
           <button class="btn small" data-act="undoimport" data-b="${r.id}">Undo Import</button></div>`;
       }).join('')}
     </div>` : ''}
+    <div class="card fade" id="syncCard" style="${syncCode ? '' : 'border-color:var(--gold)'}">
+      ${syncCode ? `
+      <h2 class="display">Sync Is On</h2>
+      <p class="muted small">Your list is the same on every device that uses this code.</p>
+      <div style="font:900 34px/1 Roboto,system-ui,sans-serif;letter-spacing:.18em;color:var(--gold);margin:6px 0 10px">${esc(syncCode)}</div>
+      <div class="small muted" id="syncStatus" style="margin-bottom:14px">${syncLabel()}</div>
+      <p class="muted small">To add another device: open Watch Next there, go to <b>Add</b>, tap <b>I Have A Code</b> and type the code above.</p>
+      <div class="btns fill"><button class="btn" data-act="synccopy">Copy Code</button><button class="btn ghost" data-act="syncstop">Stop Syncing Here</button></div>`
+      : `
+      <h2 class="display">Sync With Your iPhone</h2>
+      <p class="muted small">Get a code on one device, type it on the other, and your list stays the same on both. If both already have movies, they get combined.</p>
+      <div class="btns fill"><button class="btn primary" data-act="synccreate">Get A Sync Code</button></div>
+      <div style="display:flex;gap:8px;margin-top:10px"><input type="text" id="joinCode" placeholder="I Have A Code" maxlength="6" autocapitalize="characters" autocomplete="off" style="text-transform:uppercase;letter-spacing:.12em"><button class="btn" data-act="syncjoin">Connect</button></div>`}
+    </div>
     <div class="card fade">
       <h2 class="display">Backup</h2>
-      <p class="muted small">Your list is saved on this device. To move it to another device, save a backup here and restore it there.</p>
+      <p class="muted small">Save a copy of your list as a file, just in case.</p>
       <div class="btns fill">
         <button class="btn" data-act="backup">Save Backup</button>
         <button class="btn" data-act="restore">Restore</button>
@@ -887,6 +1007,19 @@ function act(a, el){
       break; }
     case 'canceladd': preview = null; break;
     case 'addone': { const v = $('#one').value.trim(); if (!v) return; const [it] = parseLines(v); const r = addMovies([it], 'Added'); toast(r.added ? 'Added' : 'Already on your list'); break; }
+    case 'synccreate':
+      el.disabled = true; el.textContent = 'Getting Code…';
+      createSync().then(() => { toast('Sync is on'); render(); }).catch(() => { toast("Couldn't start sync"); render(); });
+      return;
+    case 'syncjoin': {
+      const code = ($('#joinCode').value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (code.length !== 6){ toast('Codes are 6 letters and numbers'); return; }
+      el.disabled = true; el.textContent = '…';
+      joinSync(code).then(() => { toast('Connected. Your lists are combined'); render(); })
+        .catch(e => { toast(e.message === 'notfound' ? 'No list found with that code' : "Couldn't connect. Check your internet"); render(); });
+      return; }
+    case 'synccopy': navigator.clipboard && navigator.clipboard.writeText(syncCode).then(() => toast('Code copied')); return;
+    case 'syncstop': if (confirm('Stop syncing on this device? Your list stays here, it just won\'t update with your other devices.')){ stopSync(); } break;
     case 'backup': {
       const blob = new Blob([JSON.stringify(S, null, 2)], {type:'application/json'});
       const a2 = document.createElement('a'); a2.href = URL.createObjectURL(blob); a2.download = `watch-next-backup-${todayStr()}.json`; a2.click();
@@ -978,6 +1111,7 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) addEve
   save();
 })();
 render();
+if (syncCode) startListening();
 </script>
 </body>
 </html>
