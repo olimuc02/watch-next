@@ -743,13 +743,7 @@ const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
 const isStandalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
 function renderAdd(){
   const main = $('#main');
-  const how = {
-    Notes: isIOS
-      ? `<li>Open the note with your movies.</li><li>Tap and hold on the text, tap <b>Select All</b>, then <b>Copy</b>.</li><li>Come back here, tap the box below and choose <b>Paste</b>.</li>`
-      : `<li>Open the note with your movies.</li><li>Click into it, press <b>⌘A</b> then <b>⌘C</b>.</li><li>Click the box below and press <b>⌘V</b>.</li>`,
-    Reminders: `<li>This is easiest on a Mac. Open Reminders and click your movie list.</li><li>Click one reminder (beside the text, not on it), press <b>⌘A</b> to select all, then <b>⌘C</b>.</li><li>Click the box below and press <b>⌘V</b>.</li><li>On iPhone you'd have to copy them one by one, so the Mac saves a lot of time.</li>`,
-    Typed: ''
-  }[pasteSource];
+  pasteSource = 'Typed';
   main.innerHTML = `
     ${isIOS && !isStandalone ? `<div class="card fade" style="border-color:var(--gold)">
       <h2 class="display">Put It On Your Home Screen</h2>
@@ -757,9 +751,6 @@ function renderAdd(){
     <div class="card fade">
       <h2 class="display">Mass Import</h2>
       <p class="muted small">Type or paste as many titles as you like, one per line. Posters, years and descriptions get filled in for you.</p>
-      <div class="seg src-pick">${[['Typed','Type Titles'],['Notes','From Notes'],['Reminders','From Reminders']].map(([s,l]) => `<button class="${pasteSource === s ? 'on' : ''}" data-act="src" data-s="${s}">${l}</button>`).join('')}</div>
-      ${how ? `<details><summary>How to copy from ${pasteSource} →</summary><ol>${how}</ol>
-        <p class="muted small" style="margin:8px 0 0">Bullets, checkboxes and numbers get cleaned off. A year like "(1999)" is kept.</p></details>` : ''}
       <textarea id="paste" placeholder="One movie per line&#10;&#10;Past Lives&#10;The Godfather (1972)&#10;Paris, Texas&#10;Aftersun">${esc(pasteDraft)}</textarea>
       <div class="btns fill" style="margin-top:12px"><button class="btn primary" data-act="parse" id="parseBtn" disabled>Add Movies</button></div>
     </div>
