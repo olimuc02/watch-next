@@ -684,7 +684,7 @@ function renderWatched(){
 }
 
 /* ---------- Add ---------- */
-let pasteSource = 'Notes', preview = null;
+let pasteSource = 'Typed', preview = null, pasteDraft = '';
 const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
 const isStandalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
 function renderAdd(){
@@ -694,19 +694,20 @@ function renderAdd(){
       ? `<li>Open the note with your movies.</li><li>Tap and hold on the text, tap <b>Select All</b>, then <b>Copy</b>.</li><li>Come back here, tap the box below and choose <b>Paste</b>.</li>`
       : `<li>Open the note with your movies.</li><li>Click into it, press <b>⌘A</b> then <b>⌘C</b>.</li><li>Click the box below and press <b>⌘V</b>.</li>`,
     Reminders: `<li>This is easiest on a Mac. Open Reminders and click your movie list.</li><li>Click one reminder (beside the text, not on it), press <b>⌘A</b> to select all, then <b>⌘C</b>.</li><li>Click the box below and press <b>⌘V</b>.</li><li>On iPhone you'd have to copy them one by one, so the Mac saves a lot of time.</li>`,
-    Other: `<li>Copy any list with one movie per line and paste it below.</li>`
+    Typed: ''
   }[pasteSource];
   main.innerHTML = `
     ${isIOS && !isStandalone ? `<div class="card fade" style="border-color:var(--gold)">
       <h2 class="display">Put It On Your Home Screen</h2>
       <p class="muted small" style="margin:0">Tap the Share button in Safari, then <b>Add to Home Screen</b>. It'll open like a normal app, full screen.</p></div>` : ''}
     <div class="card fade">
-      <h2 class="display">Paste A List</h2>
-      <div class="seg src-pick">${['Notes','Reminders','Other'].map(s => `<button class="${pasteSource === s ? 'on' : ''}" data-act="src" data-s="${s}">${s === 'Other' ? 'Other' : s}</button>`).join('')}</div>
-      <details><summary>How to copy from ${pasteSource === 'Other' ? 'anywhere' : pasteSource} →</summary><ol>${how}</ol>
-        <p class="muted small" style="margin:8px 0 0">Bullets, checkboxes and numbers get cleaned off. A year like "(1999)" is kept.</p></details>
-      <textarea id="paste" placeholder="One movie per line&#10;&#10;Past Lives&#10;The Godfather (1972)&#10;- Paris, Texas"></textarea>
-      <div class="btns fill" style="margin-top:12px"><button class="btn primary" data-act="parse">Preview</button></div>
+      <h2 class="display">Mass Import</h2>
+      <p class="muted small">Type or paste as many titles as you like, one per line. Posters, years and descriptions get filled in for you.</p>
+      <div class="seg src-pick">${[['Typed','Type Titles'],['Notes','From Notes'],['Reminders','From Reminders']].map(([s,l]) => `<button class="${pasteSource === s ? 'on' : ''}" data-act="src" data-s="${s}">${l}</button>`).join('')}</div>
+      ${how ? `<details><summary>How to copy from ${pasteSource} →</summary><ol>${how}</ol>
+        <p class="muted small" style="margin:8px 0 0">Bullets, checkboxes and numbers get cleaned off. A year like "(1999)" is kept.</p></details>` : ''}
+      <textarea id="paste" placeholder="One movie per line&#10;&#10;Past Lives&#10;The Godfather (1972)&#10;Paris, Texas&#10;Aftersun">${esc(pasteDraft)}</textarea>
+      <div class="btns fill" style="margin-top:12px"><button class="btn primary" data-act="parse" id="parseBtn" disabled>Add Movies</button></div>
     </div>
     <div class="card fade">
       <h2 class="display">From IMDb</h2>
@@ -715,10 +716,6 @@ function renderAdd(){
         <p class="muted small" style="margin:8px 0 0">IMDb files bring year, length, genre and rating, which helps the filters on Tonight.</p></details>
       <div class="drop" id="drop">${isIOS ? 'Tap to choose the IMDb file' : 'Drop the IMDb file here, or click to choose it'}</div>
       <label class="toggle"><span>Leave Out TV Shows</span><input type="checkbox" id="skipTV" checked><i class="sw"></i></label>
-    </div>
-    <div class="card fade">
-      <h2 class="display">Add One</h2>
-      <div style="display:flex;gap:8px"><input type="text" id="one" placeholder="Movie title" enterkeyhint="done"><button class="btn primary" data-act="addone">Add</button></div>
     </div>
     <div class="card fade">
       <h2 class="display">Backup</h2>
@@ -730,7 +727,10 @@ function renderAdd(){
       <div class="btns fill" style="margin-top:6px"><button class="btn ghost" data-act="wipe">Start Over</button></div>
     </div>`;
   if (preview) showPreview();
-  $('#one').addEventListener('keydown', e => { if (e.key === 'Enter') act('addone'); });
+  const ta = $('#paste'), pb = $('#parseBtn');
+  const count = () => { pasteDraft = ta.value; const n = parseLines(ta.value).length;
+    pb.disabled = !n; pb.textContent = n ? (pasteSource === 'Typed' ? `Add ${n} Movie${n === 1 ? '' : 's'}` : `Preview ${n} Movie${n === 1 ? '' : 's'}`) : 'Add Movies'; };
+  ta.addEventListener('input', count); count();
   const drop = $('#drop');
   drop.onclick = () => $('#fileIn').click();
   drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
@@ -796,10 +796,16 @@ function act(a, el){
     case 'vsskip': vsPair = makePair(); break;
     case 'rankexit': rankMode = null; break;
     case 'src': pasteSource = el.dataset.s; break;
-    case 'parse': { const items = parseLines($('#paste').value); if (!items.length){ toast('Paste some movies first'); return; } preview = {items, source:pasteSource === 'Other' ? 'Pasted' : pasteSource}; break; }
+    case 'parse': {
+      const items = parseLines($('#paste').value); if (!items.length){ toast('Type some movies first'); return; }
+      if (pasteSource === 'Typed'){
+        const r = addMovies(items, 'Added'); pasteDraft = '';
+        toast(`${r.added} added${r.merged ? `, ${r.merged} already on your list` : ''}`);
+      } else preview = {items, source:pasteSource};
+      break; }
     case 'confirmadd': {
       const keep = [...document.querySelectorAll('[data-pi]')].filter(c => c.checked).map(c => preview.items[+c.dataset.pi]);
-      const r = addMovies(keep, preview.source); preview = null;
+      const r = addMovies(keep, preview.source); preview = null; pasteDraft = '';
       toast(`${r.added} added${r.merged ? `, ${r.merged} merged` : ''}`);
       break; }
     case 'canceladd': preview = null; break;
