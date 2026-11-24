@@ -416,21 +416,36 @@ function findMatch(title, year){
 }
 function addMovies(items, source){
   let added = 0, merged = 0;
+  const batch = uid(), touched = [];
   for (const it of items){
     if (!it || !it.title) continue;
     const ex = findMatch(it.title, it.year);
     if (ex){
-      if (!ex.sources.includes(source)) ex.sources.push(source);
+      if (!ex.sources.includes(source)){ ex.sources.push(source); if (ex.batch !== batch) touched.push(ex.id); }
       for (const k of ['year','runtime','imdbRating','url','genres']) if (!ex[k] || (Array.isArray(ex[k]) && !ex[k].length)) { if (it[k]) ex[k] = it[k]; }
       merged++;
     } else {
       S.movies.push({ id:uid(), title:it.title, year:it.year||null, runtime:it.runtime||null, imdbRating:it.imdbRating||null,
-        url:it.url||'', genres:it.genres||[], sources:[source], tier:0, watched:false, addedAt:Date.now() });
+        url:it.url||'', genres:it.genres||[], sources:[source], tier:0, watched:false, addedAt:Date.now(), batch });
       added++;
     }
   }
+  if (added || touched.length){
+    S.imports = [{id:batch, at:Date.now(), source, added, touched}, ...(S.imports || [])].slice(0, 8);
+  }
   save();
   return {added, merged};
+}
+// Take back everything one import brought in
+function undoImport(bid){
+  const rec = (S.imports || []).find(r => r.id === bid); if (!rec) return 0;
+  const before = S.movies.length;
+  S.movies = S.movies.filter(m => m.batch !== bid);
+  for (const id of rec.touched){ const m = byId(id); if (m && m.sources.length > 1) m.sources = m.sources.filter(s => s !== rec.source); }
+  S.imports = S.imports.filter(r => r.id !== bid);
+  if (S.today && !byId(S.today.id)) S.today = null;
+  save();
+  return before - S.movies.length;
 }
 
 /* ---------- Parsing ---------- */
@@ -762,6 +777,19 @@ function renderAdd(){
       <div class="drop" id="drop">${isIOS ? 'Tap to choose the IMDb file' : 'Drop the IMDb file here, or click to choose it'}</div>
       <label class="toggle"><span>Leave Out TV Shows</span><input type="checkbox" id="skipTV" checked><i class="sw"></i></label>
     </div>
+    ${(S.imports || []).length ? `<div class="card fade">
+      <h2 class="display">Recent Imports</h2>
+      <p class="muted small">Undo takes back every movie that import added, even if you've ranked them since.</p>
+      ${S.imports.map(r => {
+        const left = S.movies.filter(m => m.batch === r.id);
+        const names = left.slice(0, 3).map(m => m.title).join(', ') + (left.length > 3 ? ` + ${left.length - 3} more` : '');
+        const when = new Date(r.at).toLocaleString(undefined, {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+        return `<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--line)">
+          <div style="flex:1;min-width:0"><div style="font-weight:600">${left.length} Movie${left.length === 1 ? '' : 's'} <span class="muted small" style="font-weight:400">· ${esc(r.source === 'Added' ? 'Typed' : r.source)} · ${when}</span></div>
+          <div class="muted small" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(names || 'Only updated movies already on your list')}</div></div>
+          <button class="btn small" data-act="undoimport" data-b="${r.id}">Undo Import</button></div>`;
+      }).join('')}
+    </div>` : ''}
     <div class="card fade">
       <h2 class="display">Backup</h2>
       <p class="muted small">Your list is saved on this device. To move it to another device, save a backup here and restore it there.</p>
@@ -848,6 +876,10 @@ function act(a, el){
         toast(`${r.added} added${r.merged ? `, ${r.merged} already on your list` : ''}`);
       } else preview = {items, source:pasteSource};
       break; }
+    case 'undoimport': {
+      const n = S.movies.filter(m => m.batch === el.dataset.b).length;
+      if (!confirm(`Undo this import? ${n} movie${n === 1 ? '' : 's'} will be removed from your list.`)) return;
+      const gone = undoImport(el.dataset.b); toast(`Removed ${gone} movie${gone === 1 ? '' : 's'}`); break; }
     case 'confirmadd': {
       const keep = [...document.querySelectorAll('[data-pi]')].filter(c => c.checked).map(c => preview.items[+c.dataset.pi]);
       const r = addMovies(keep, preview.source); preview = null; pasteDraft = '';
@@ -932,6 +964,19 @@ document.addEventListener('pointercancel', endDrag);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && S.tab === 'tonight') render(); });
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(()=>{}));
 
+// Movies imported before Undo existed: group them back into imports by where + when they were added
+(function tagOldImports(){
+  if (S.imports) return;
+  const loose = S.movies.filter(m => !m.batch && m.addedAt).sort((a,b) => a.addedAt - b.addedAt);
+  const recs = []; let cur = null;
+  for (const m of loose){
+    const src = m.sources[0];
+    if (!cur || src !== cur.source || m.addedAt - cur.last > 3000){ cur = {id:uid(), at:m.addedAt, source:src, added:0, touched:[], last:m.addedAt}; recs.push(cur); }
+    m.batch = cur.id; cur.added++; cur.last = m.addedAt;
+  }
+  S.imports = recs.reverse().slice(0, 8).map(({last, ...r}) => r);
+  save();
+})();
 render();
 </script>
 </body>
